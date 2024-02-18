@@ -120,14 +120,15 @@ namespace Dune {
                      << " after " << it << " iterations");
 
 
-        if (it<1)
-          p = r;
-        else
-        {
+        if (it>1) {
           beta = ( rho_new / rho ) * ( alpha / omega );
           p.axpy(-omega,v); // p = r + beta (p - omega*v)
           p *= beta;
           p += r;
+        }
+        else
+        {
+          p = r;
         }
 
         // y = W^-1 * p
