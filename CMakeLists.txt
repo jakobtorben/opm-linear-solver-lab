@@ -10,6 +10,12 @@ option(OPM_REQUIRES_VEXCL OFF)
 
 list(APPEND CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake/Modules)
 
+# Set PETSc directory
+# Replace this with the path to your PETSc installation if not set as an environment variable
+set(PETSC_DIR $ENV{PETSC_DIR})
+set(PETSC_ARCH $ENV{PETSC_ARCH})
+
+
 find_package(CUDAToolkit REQUIRED)
 find_package(TBB REQUIRED)
 find_package(dune-common REQUIRED)
@@ -18,7 +24,7 @@ find_package(dune-geometry REQUIRED)
 find_package(dune-istl REQUIRED)
 find_package(opm-simulators REQUIRED)
 find_package(fmt REQUIRED)
-find_package(Petsc)
+find_package(Petsc REQUIRED)
 find_package(amgcl)
 
 if (amgcl_FOUND)
@@ -72,9 +78,14 @@ if (HAVE_AMGCL)
 
 endif()
 
-if(Petsc_FOUND)
+if(PETSC_FOUND)
   add_executable(linearsolverlab_petsc src/petsc.cpp)
   target_include_directories(linearsolverlab_petsc PRIVATE ${PETSC_INCLUDE_DIRS} ${opm-simulators_INCLUDE_DIRS})
   target_link_libraries(linearsolverlab_petsc PRIVATE ${PETSC_LIBRARIES} fmt::fmt Boost::program_options ${opm-simulators_LIBRARIES})
+
+  add_executable(linearsolverlab_amgx src/amgx.cpp)
+  link_directories(/usr/lib/x86_64-linux-gnu/libscotch-6.so)
+  target_include_directories(linearsolverlab_amgx PRIVATE ${PETSC_INCLUDE_DIRS} ${opm-simulators_INCLUDE_DIRS})
+  target_link_libraries(linearsolverlab_amgx PRIVATE ${PETSC_LIBRARIES} scotch fmt::fmt Boost::program_options ${opm-simulators_LIBRARIES})
 endif()
 
