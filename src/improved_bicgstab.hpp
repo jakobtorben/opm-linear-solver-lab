@@ -148,9 +148,7 @@ namespace Dune {
 
         alpha = rho_new / h;
 
-        // apply first correction to x
-        // x <- x + alpha y
-        x.axpy(alpha,y);
+
 
         // r = r - alpha*v
         r.axpy(-alpha,v);
@@ -161,6 +159,9 @@ namespace Dune {
 
         norm = _sp->norm(r);
         if(iteration.step(it, norm)){
+          // apply first correction to x
+          // x <- x + alpha y
+          x.axpy(alpha,y);
           break;
         }
 
@@ -175,6 +176,10 @@ namespace Dune {
 
         // omega = < t, r > / < t, t >
         omega = _sp->dot(t,r)/_sp->dot(t,t);
+
+        // apply first correction to x
+        // x <- x + alpha y
+        x.axpy(alpha,y);
 
         // apply second correction to x
         // x <- x + omega y
