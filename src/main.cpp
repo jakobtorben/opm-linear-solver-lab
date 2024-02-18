@@ -27,6 +27,7 @@
 
 #include <boost/program_options.hpp>
 
+#include "improved_bicgstab.hpp"
 #include "read_binary.hpp"
 
 template <class VectorType>
@@ -265,13 +266,19 @@ readAndSolve(const auto jsonConfigCPUFilename,
         Opm::PropertyTree configurationCPU(jsonConfigCPUFilename);
         auto solverNameCPU = configurationCPU.get<std::string>("solver");
 
-        if (solverNameCPU != "bicgstab" && solverNameCPU != "onlypreconditioner") {
+        if ((solverNameCPU != "bicgstab" && solverNameCPU != "improved_bicgstab" ) && solverNameCPU != "onlypreconditioner") {
             throw std::runtime_error(
                 fmt::format("We only support bicgstab and onlypreconditioner, but given {}.", solverNameCPU));
         }
 
         if (solverNameCPU == "bicgstab") {
             auto runtimeCPU = makeTree(readAndSolveCPU<dim, Dune::BiCGSTABSolver>(
+                jsonConfigCPUFilename, xFilename, matrixFilename, rhsFilename));
+
+            tree.add_child("CPU", runtimeCPU);
+        }
+        else if (solverNameCPU == "improved_bicgstab") {
+            auto runtimeCPU = makeTree(readAndSolveCPU<dim, Dune::ImprovedBiCGSTABSolver>(
                 jsonConfigCPUFilename, xFilename, matrixFilename, rhsFilename));
 
             tree.add_child("CPU", runtimeCPU);
@@ -286,7 +293,7 @@ readAndSolve(const auto jsonConfigCPUFilename,
         Opm::PropertyTree configurationGPU(jsonConfigGPUFilename);
         auto solverNameGPU = configurationGPU.get<std::string>("solver");
 
-        if (solverNameGPU != "cubicgstab" && solverNameGPU != "onlypreconditioner") {
+        if ((solverNameGPU != "cubicgstab" && solverNameGPU != "improved_cubicgstab") && solverNameGPU != "onlypreconditioner") {
             throw std::runtime_error(fmt::format(
                 "We only support cubicgstab and onlypreconditioner for the GPU, but given {}.", solverNameGPU));
         }
@@ -296,7 +303,14 @@ readAndSolve(const auto jsonConfigCPUFilename,
                 jsonConfigGPUFilename, xFilename, matrixFilename, rhsFilename));
             tree.add_child("GPU", runtimeGPU);
 
-        } else {
+        }
+        else if (solverNameGPU == "improved_cubicgstab") {
+            const auto runtimeGPU = makeTree(readAndSolveGPU<dim, Dune::ImprovedBiCGSTABSolver>(
+                jsonConfigGPUFilename, xFilename, matrixFilename, rhsFilename));
+            tree.add_child("GPU", runtimeGPU);
+
+        }
+         else {
             const auto runtimeGPU = makeTree(readAndSolveGPU<dim, OnlyPreconditionSolver>(
                 jsonConfigGPUFilename, xFilename, matrixFilename, rhsFilename));
             tree.add_child("GPU", runtimeGPU);
