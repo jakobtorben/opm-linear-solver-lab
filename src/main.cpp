@@ -100,7 +100,7 @@ protected:
 };
 
 template <int dim, template <class> class Solver = Dune::BiCGSTABSolver, class T = double>
-std::tuple<unsigned long long, Dune::InverseOperatorResult, bool>
+std::tuple<double, Dune::InverseOperatorResult, bool>
 readAndSolveCPU(const auto jsonConfigCPUFilename,
                 const auto xFilename,
                 const auto matrixFilename,
@@ -145,15 +145,16 @@ readAndSolveCPU(const auto jsonConfigCPUFilename,
                                     configurationCPU.get<int>("verbosity"));
 
     auto cpuStart = std::chrono::high_resolution_clock::now();
-    solverCPU.apply(x, rhs, resultCPU);
+    for (int i = 0; i<100; i++) {
+        solverCPU.apply(x, rhs, resultCPU);
+    }
     auto cpuEnd = std::chrono::high_resolution_clock::now();
 
-
-    const auto duration = std::chrono::duration_cast<std::chrono::microseconds>(cpuEnd - cpuStart);
-    return std::make_tuple(duration.count(), resultCPU, false);
+    const auto duration = std::chrono::duration<double>(cpuEnd - cpuStart).count();
+    return std::make_tuple(duration, resultCPU, false);
 }
 template <int dim, template <class> class Solver = Dune::BiCGSTABSolver, class T = double>
-std::tuple<unsigned long long, Dune::InverseOperatorResult, bool>
+std::tuple<double, Dune::InverseOperatorResult, bool>
 readAndSolveGPU(const auto jsonConfigGPUFilename,
                 const auto xFilename,
                 const auto matrixFilename,
@@ -221,7 +222,9 @@ readAndSolveGPU(const auto jsonConfigGPUFilename,
 
     auto gpuStart = std::chrono::high_resolution_clock::now();
     try {
-        solver.apply(xOnGPU, rhsOnGPU, result);
+        for (int i = 0; i<100; i++) {
+            solver.apply(xOnGPU, rhsOnGPU, result);
+        }
     } catch (const std::logic_error& e) {
         gpufailed = true;
     }
@@ -229,12 +232,12 @@ readAndSolveGPU(const auto jsonConfigGPUFilename,
     OPM_CUDA_SAFE_CALL(cudaDeviceSynchronize());
     auto gpuEnd = std::chrono::high_resolution_clock::now();
 
-    const auto duration = std::chrono::duration_cast<std::chrono::microseconds>(gpuEnd - gpuStart);
-    return std::make_tuple(duration.count(), result, gpufailed);
+    const auto duration = std::chrono::duration<double>(gpuEnd - gpuStart).count();
+    return std::make_tuple(duration, result, gpufailed);
 }
 
 boost::property_tree::ptree
-makeTree(const std::tuple<unsigned long long, Dune::InverseOperatorResult, bool>& resultstuple)
+makeTree(const std::tuple<double, Dune::InverseOperatorResult, bool>& resultstuple)
 {
     boost::property_tree::ptree tree;
     auto [runtime, result, failed] = resultstuple;

@@ -62,15 +62,28 @@ namespace Dune {
       field_type rho, rho_new, alpha, beta, h, omega;
       real_type norm;
 
-      //
-      // get vectors and matrix
-      //
+    // check if internal vectors have not been allocated yet
+    if (!p_ptr) {
+        p_ptr = std::make_shared<X>(x.dim());
+        v_ptr = std::make_shared<X>(x.dim());
+        t_ptr = std::make_shared<X>(x.dim());
+        y_ptr = std::make_shared<X>(x.dim());
+        rt_ptr = std::make_shared<X>(x.dim());
+    }
+
+      X& p = *p_ptr;
+      X& v = *v_ptr;
+      X& t = *t_ptr;
+      X& y = *y_ptr;
+      X& rt = *rt_ptr;
       X& r=b;
-      X p(x);
-      X v(x);
-      X t(x);
-      X y(x);
-      X rt(x);
+
+
+      p = x;
+      v = x;
+      t = x;
+      y = x;
+      rt = x;
 
       //
       // begin iteration
@@ -121,7 +134,9 @@ namespace Dune {
 
 
         if (it>1) {
-          beta = ( rho_new / rho ) * ( alpha / omega );
+          beta = Simd::cond(norm==field_type(0.),
+                            field_type(0.), // no need for orthogonalization if norm is already 0
+                            ( rho_new / rho ) * ( alpha / omega ));
           p.axpy(-omega,v); // p = r + beta (p - omega*v)
           p *= beta;
           p += r;
@@ -146,9 +161,13 @@ namespace Dune {
                      << Simd::io(abs(h)) << " < EPSILON " << EPSILON
                      << " after " << it << " iterations");
 
-        alpha = rho_new / h;
+        alpha = Simd::cond(norm==field_type(0.),
+                           field_type(0.),
+                           rho_new / h);
 
-
+        // apply first correction to x
+        // x <- x + alpha y
+        x.axpy(alpha,y);
 
         // r = r - alpha*v
         r.axpy(-alpha,v);
@@ -159,9 +178,6 @@ namespace Dune {
 
         norm = _sp->norm(r);
         if(iteration.step(it, norm)){
-          // apply first correction to x
-          // x <- x + alpha y
-          x.axpy(alpha,y);
           break;
         }
 
@@ -175,11 +191,10 @@ namespace Dune {
         _op->apply(y,t);
 
         // omega = < t, r > / < t, t >
-        omega = _sp->dot(t,r)/_sp->dot(t,t);
-
-        // apply first correction to x
-        // x <- x + alpha y
-        x.axpy(alpha,y);
+        h = _sp->dot(t,t);
+        omega = Simd::cond(norm==field_type(0.),
+                           field_type(0.),
+                           _sp->dot(t,r)/h);
 
         // apply second correction to x
         // x <- x + omega y
@@ -212,9 +227,12 @@ namespace Dune {
     using IterativeSolver<X,X>::_verbose;
     template<class CountType>
     using Iteration = typename IterativeSolver<X,X>::template Iteration<CountType>;
+    std::shared_ptr<X> p_ptr;
+    std::shared_ptr<X> v_ptr;
+    std::shared_ptr<X> t_ptr;
+    std::shared_ptr<X> y_ptr;
+    std::shared_ptr<X> rt_ptr;
   };
-  // DUNE_REGISTER_ITERATIVE_SOLVER("bicgstabsolver", defaultIterativeSolverCreator<Dune::BiCGSTABSolver>());
-
 }
 
   #endif
