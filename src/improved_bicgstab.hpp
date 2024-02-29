@@ -78,13 +78,6 @@ namespace Dune {
       X& rt = *rt_ptr;
       X& r=b;
 
-
-      p = x;
-      v = x;
-      t = x;
-      y = x;
-      rt = x;
-
       //
       // begin iteration
       //
