@@ -6,6 +6,8 @@
 #endif
 
 #include <boost/program_options.hpp>
+#include <boost/property_tree/json_parser.hpp>
+#include <boost/property_tree/ptree.hpp>
 
 #include <opm/simulators/utils/DeferredLoggingErrorHelpers.hpp>
 #include <opm/simulators/utils/ParallelCommunication.hpp>
@@ -148,12 +150,108 @@ Vec readVector(const std::string& path)
     return b;
 }
 
+
+std::tuple<unsigned long long, double, KSPConvergedReason,  PetscInt, PetscReal> solveWithPETSc(
+    int argc,
+    char** argv,
+    const std::string& matrixFilename,
+    const std::string& rhsFilename,
+    const std::string& xFilename
+) {
+
+    PetscInitialize(&argc, &argv, 0, PETSC_NULLPTR);
+
+    Mat A = readMatrix(matrixFilename);
+    Vec b = readVector(rhsFilename);
+    Vec x;
+    if (!xFilename.empty())
+        x = readVector(xFilename);
+    else {
+        VecDuplicate(b, &x);
+    }
+
+    KSP ksp;
+    KSPCreate(PETSC_COMM_WORLD, &ksp);
+
+    PC pc;
+    KSPGetPC(ksp, &pc);
+    PCSetFromOptions(pc);
+
+    KSPSetOperators(ksp, A, A);
+    if (!xFilename.empty()) {
+        KSPSetInitialGuessNonzero(ksp, xFilename.empty() ? PETSC_FALSE : PETSC_TRUE);
+    }
+
+    KSPSetFromOptions(ksp);
+    KSPSetUp(ksp);
+    KSPView(ksp, PETSC_VIEWER_STDOUT_WORLD);
+
+    Opm::Parallel::Communication comm(PETSC_COMM_WORLD);
+
+    auto start = std::chrono::high_resolution_clock::now();
+    PetscLogDouble startTime, endTime;
+    PetscTime(&startTime);
+    KSPSolve(ksp,b,x);
+    PetscTime(&endTime);
+    auto end = std::chrono::high_resolution_clock::now();
+
+
+    
+    KSPConvergedReason reason;
+    KSPGetConvergedReason(ksp,&reason);
+    if (reason < 0) {
+        if (comm.rank() == 0) {
+            std::cout << "Linear solve failed with reason " << KSPConvergedReasons[reason] << std::endl;
+        }
+    }
+
+    bool success = reason > 0; // Check if the solver converged successfully
+
+    PetscInt its;
+    KSPGetIterationNumber(ksp, &its);
+    if (comm.rank() == 0) {
+        std::cout << "Success! Converged in " << its << " iterations" << std::endl;
+    }
+
+    PetscReal norm;
+    KSPGetResidualNorm(ksp, &norm);
+
+
+    MatDestroy(&A);
+    VecDestroy(&b);
+    VecDestroy(&x);
+    KSPDestroy(&ksp);
+
+    PetscFinalize();
+    auto duration_manual = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+    auto duration_petsc = endTime - startTime;
+
+    return std::make_tuple(duration_manual, duration_petsc, reason, its, norm);
+}
+
+// Adjusted makeTree to match PETSc results
+boost::property_tree::ptree makeTree(const std::tuple<unsigned long long, double, KSPConvergedReason, PetscInt, PetscReal>& resultsTuple) {
+    boost::property_tree::ptree tree;
+    auto [runtime, elapsed, reason, iterations, residualNorm] = resultsTuple;
+
+    tree.add("runtime", runtime); // Microseconds
+    tree.add("converged_reason", static_cast<int>(reason));
+    tree.add("iterations", iterations);
+    tree.add("residual_norm", residualNorm);
+    tree.add("converged", reason > 0);
+    tree.add("elapsed", elapsed);
+
+    return tree;
+}
+
+
+
 int main(int argc, char** argv)
 {
     namespace po = boost::program_options;
     po::options_description desc("Run matrix benchmark.");
     desc.add_options()("help", "Produce this help message.")(
-        "matrix-file,m", po::value<std::string>()->required(), "Matrix filename.")(
+        "matrix-file,A", po::value<std::string>()->required(), "Matrix filename.")(
         "initial-guess-file,x", po::value<std::string>()->default_value(""), "x (initial guess) filename.")(
         "rhs-file,y", po::value<std::string>()->required(), "y (right hand side) filename.");
 
@@ -195,56 +293,13 @@ int main(int argc, char** argv)
     const auto xFilename = vm["initial-guess-file"].as<std::string>();
     const auto rhsFilename = vm["rhs-file"].as<std::string>();
 
-    PetscInitialize(&argc, &argv, 0, PETSC_NULLPTR);
+    auto tree = boost::property_tree::ptree();
+    auto runtimePETSC = makeTree(solveWithPETSc(argc, argv, matrixFilename, rhsFilename, xFilename));
+    tree.add_child("PETSC", runtimePETSC);
+    boost::property_tree::write_json(std::cout, tree, true);
+    
 
-    Mat A = readMatrix(matrixFilename);
-    Vec b = readVector(rhsFilename);
-    Vec x;
-    if (!xFilename.empty())
-        x = readVector(xFilename);
-    else {
-        VecDuplicate(b, &x);
-    }
-
-    KSP ksp;
-    KSPCreate(PETSC_COMM_WORLD, &ksp);
-
-    PC pc;
-    KSPGetPC(ksp, &pc);
-    PCSetFromOptions(pc);
-
-    KSPSetOperators(ksp, A, A);
-    if (!xFilename.empty()) {
-        KSPSetInitialGuessNonzero(ksp, xFilename.empty() ? PETSC_FALSE : PETSC_TRUE);
-    }
-
-    KSPSetFromOptions(ksp);
-    KSPSetUp(ksp);
-    KSPView(ksp, PETSC_VIEWER_STDOUT_WORLD);
-
-    Opm::Parallel::Communication comm(PETSC_COMM_WORLD);
-
-    KSPSolve(ksp,b,x);
-    KSPConvergedReason reason;
-    KSPGetConvergedReason(ksp,&reason);
-    if (reason < 0) {
-        if (comm.rank() == 0) {
-            std::cout << "Linear solve failed with reason " << KSPConvergedReasons[reason] << std::endl;
-        }
-        return 1;
-    }
-
-    PetscInt its;
-    KSPGetIterationNumber(ksp, &its);
-    if (comm.rank() == 0) {
-        std::cout << "Success! Converged in " << its << " iterations" << std::endl;
-    }
-
-    MatDestroy(&A);
-    VecDestroy(&b);
-    VecDestroy(&x);
-    KSPDestroy(&ksp);
-
-    PetscFinalize();
     return 0;
+
+
 }

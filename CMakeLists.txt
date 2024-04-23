@@ -83,9 +83,14 @@ if(PETSC_FOUND)
   target_include_directories(linearsolverlab_petsc PRIVATE ${PETSC_INCLUDE_DIRS} ${opm-simulators_INCLUDE_DIRS})
   target_link_libraries(linearsolverlab_petsc PRIVATE ${PETSC_LIBRARIES} fmt::fmt Boost::program_options ${opm-simulators_LIBRARIES})
 
-  add_executable(linearsolverlab_amgx src/amgx.cpp)
-  link_directories(/usr/lib/x86_64-linux-gnu/libscotch-6.so)
-  target_include_directories(linearsolverlab_amgx PRIVATE ${PETSC_INCLUDE_DIRS} ${opm-simulators_INCLUDE_DIRS})
-  target_link_libraries(linearsolverlab_amgx PRIVATE ${PETSC_LIBRARIES} scotch fmt::fmt Boost::program_options ${opm-simulators_LIBRARIES})
+  add_executable(linearsolverlab_amgx_dummy src/amgx_dummy.cpp)
+  #link_directories(/usr/lib/x86_64-linux-gnu/libscotch-6.so)
+  target_include_directories(linearsolverlab_amgx_dummy PRIVATE ${PETSC_INCLUDE_DIRS} ${opm-simulators_INCLUDE_DIRS})
+  target_link_libraries(linearsolverlab_amgx_dummy PRIVATE ${PETSC_LIBRARIES} fmt::fmt Boost::program_options ${opm-simulators_LIBRARIES})
+
+  add_executable(linearsolverlab_amgx_OPM_matrix src/amgx_OPM_matrix.cpp)
+  #link_directories(/usr/lib/x86_64-linux-gnu/libscotch-6.so)
+  target_include_directories(linearsolverlab_amgx_OPM_matrix PRIVATE ${PETSC_INCLUDE_DIRS} ${opm-simulators_INCLUDE_DIRS})
+  target_link_libraries(linearsolverlab_amgx_OPM_matrix PRIVATE ${PETSC_LIBRARIES} fmt::fmt Boost::program_options ${opm-simulators_LIBRARIES})
 endif()
 

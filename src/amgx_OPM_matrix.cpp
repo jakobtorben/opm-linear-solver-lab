@@ -71,6 +71,7 @@ Mat readMatrix(const std::string& path)
             int i, j;
             double val;
             str >> i >> j >> val;
+            //std::cout << i-1 << " " << j-1 << " " << val << "\n";
              MatSetValue(A, i-1, j-1, val, INSERT_VALUES);
         }
     }
@@ -211,29 +212,35 @@ int main(int argc, char** argv)
     // Create KSP solver and set operators
     KSP ksp;
     KSPCreate(PETSC_COMM_WORLD, &ksp);
+    //KSPSetType(ksp, KSPBCGS);
     KSPSetOperators(ksp, A, A);
 
     // Get the Preconditioner and set it to use AmgX
     PC pc;
     KSPGetPC(ksp, &pc);
     PCSetType(pc, PCAMGX);
+    KSPSetTolerances(ksp, 1.e-5, PETSC_DEFAULT, PETSC_DEFAULT, PETSC_DEFAULT);
 
     // Configure AmgX solver
     //PetscOptionsSetValue(NULL, "-pc_amgx_amg_method", "AGGREGATION");
     //PetscOptionsSetValue(NULL, "-pc_amgx_smoother", "BLOCK_JACOBI");
+    //PetscOptionsSetValue(NULL, "-pc_amgx_smoother", "MULTICOLOR_DILU");
+    PetscOptionsSetValue(NULL, "-pc_amgx_verbose", "True");
+    PetscOptionsSetValue(NULL, "-pc_amgx_print_grid_stats", "True");
+    //PetscOptionsSetValue(NULL, "-pc_amgx_selector", "SIZE_2");
+    //PetscOptionsSetValue(NULL, "-pc_amgx_strength_threshold", "0.3");
+    
+ 
 
+    KSPSetFromOptions(ksp);
     PCSetFromOptions(pc);
-    /*
+    
     if (!xFilename.empty()) {
         KSPSetInitialGuessNonzero(ksp, xFilename.empty() ? PETSC_FALSE : PETSC_TRUE);
     }
-
-    KSPSetFromOptions(ksp);
     KSPSetUp(ksp);
+    PCSetUp(pc);
     KSPView(ksp, PETSC_VIEWER_STDOUT_WORLD);
-
-    Opm::Parallel::Communication comm(PETSC_COMM_WORLD);
-    */
 
     // Solve the system
     KSPSolve(ksp, b, x);
@@ -243,30 +250,21 @@ int main(int argc, char** argv)
     // Check for convergence
     KSPConvergedReason reason;
     KSPGetConvergedReason(ksp, &reason);
+
+    PetscReal norm;
+    KSPGetResidualNorm(ksp, &norm);
+    PetscPrintf(PETSC_COMM_WORLD, "Norm: %f \n", norm);
+
     if (reason < 0) {
-        PetscPrintf(PETSC_COMM_WORLD, "KSP did not converge.\n");
+        PetscInt its;
+        KSPGetIterationNumber(ksp, &its);
+        PetscPrintf(PETSC_COMM_WORLD, "KSP did not converge. It used %d iterations.\n", its);
     } else {
         PetscInt its;
         KSPGetIterationNumber(ksp, &its);
         PetscPrintf(PETSC_COMM_WORLD, "KSP Converged in %d iterations.\n", its);
     }
     
-    /*
-    KSPConvergedReason reason;
-    KSPGetConvergedReason(ksp,&reason);
-    if (reason < 0) {
-        if (comm.rank() == 0) {
-            std::cout << "Linear solve failed with reason " << KSPConvergedReasons[reason] << std::endl;
-        }
-        return 1;
-    }
-
-    PetscInt its;
-    KSPGetIterationNumber(ksp, &its);
-    if (comm.rank() == 0) {
-        std::cout << "Success! Converged in " << its << " iterations" << std::endl;
-    }
-    */
     // Cleanup
     MatDestroy(&A);
     VecDestroy(&b);
