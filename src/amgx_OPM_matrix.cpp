@@ -6,6 +6,8 @@
 #endif
 
 #include <boost/program_options.hpp>
+#include <boost/property_tree/json_parser.hpp>
+#include <boost/property_tree/ptree.hpp>
 
 #include <opm/simulators/utils/DeferredLoggingErrorHelpers.hpp>
 #include <opm/simulators/utils/ParallelCommunication.hpp>
@@ -149,8 +151,116 @@ Vec readVector(const std::string& path)
     return b;
 }
 
-int main(int argc, char** argv)
-{
+
+
+
+std::tuple<unsigned long long, double, KSPConvergedReason,  PetscInt, PetscReal> solveWithPETScAMGx(
+    int argc,
+    char** argv,
+    const std::string& matrixFilename,
+    const std::string& rhsFilename,
+    const std::string& xFilename
+) {
+    // Initialize PETSc
+    PetscInitialize(&argc, &argv, 0, PETSC_NULLPTR);
+
+    // Read matrix and vectors
+    Mat A = readMatrix(matrixFilename);
+    Vec b = readVector(rhsFilename);
+    Vec x;
+    if (!xFilename.empty())
+        x = readVector(xFilename);
+    else {
+        VecDuplicate(b, &x);
+    }
+
+    // Create KSP solver and set operators
+    KSP ksp;
+    KSPCreate(PETSC_COMM_WORLD, &ksp);
+    //KSPSetType(ksp, KSPBCGS);
+    KSPSetOperators(ksp, A, A);
+
+    // Get the Preconditioner and set it to use AmgX
+    PC pc;
+    KSPGetPC(ksp, &pc);
+    PCSetType(pc, PCAMGX);
+    KSPSetTolerances(ksp, 1.e-5, PETSC_DEFAULT, PETSC_DEFAULT, PETSC_DEFAULT);
+
+    // Configure AmgX solver
+    //PetscOptionsSetValue(NULL, "-pc_amgx_amg_method", "AGGREGATION");
+    PetscOptionsSetValue(NULL, "-pc_amgx_smoother", "MULTICOLOR_DILU");
+    PetscOptionsSetValue(NULL, "-pc_amgx_verbose", "True");
+    PetscOptionsSetValue(NULL, "-pc_amgx_print_grid_stats", "True");
+    //PetscOptionsSetValue(NULL, "-pc_amgx_selector", "SIZE_2");
+    //PetscOptionsSetValue(NULL, "-pc_amgx_strength_threshold", "0.3");
+
+    KSPSetFromOptions(ksp);
+    PCSetFromOptions(pc);
+
+    if (!xFilename.empty()) {
+        KSPSetInitialGuessNonzero(ksp, xFilename.empty() ? PETSC_FALSE : PETSC_TRUE);
+    }
+    KSPSetUp(ksp);
+    PCSetUp(pc);
+    KSPView(ksp, PETSC_VIEWER_STDOUT_WORLD);
+
+    auto start = std::chrono::high_resolution_clock::now();
+    PetscLogDouble startTime, endTime;
+    PetscTime(&startTime);
+    // Solve the system
+    KSPSolve(ksp, b, x);
+    PetscTime(&endTime);
+    auto end = std::chrono::high_resolution_clock::now();
+
+    // Check for convergence
+    KSPConvergedReason reason;
+    KSPGetConvergedReason(ksp, &reason);
+
+    PetscReal norm;
+    KSPGetResidualNorm(ksp, &norm);
+    PetscPrintf(PETSC_COMM_WORLD, "Norm: %f \n", norm);
+    
+    PetscInt its;
+    if (reason < 0) {
+        KSPGetIterationNumber(ksp, &its);
+        PetscPrintf(PETSC_COMM_WORLD, "KSP did not converge. It used %d iterations.\n", its);
+    } else {
+        KSPGetIterationNumber(ksp, &its);
+        PetscPrintf(PETSC_COMM_WORLD, "KSP Converged in %d iterations.\n", its);
+    }
+    
+    // Cleanup
+    MatDestroy(&A);
+    VecDestroy(&b);
+    VecDestroy(&x);
+    KSPDestroy(&ksp);
+    PetscFinalize();
+
+    auto duration_manual = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+    auto duration_petsc = endTime - startTime;
+
+    return std::make_tuple(duration_manual, duration_petsc, reason, its, norm);
+}
+
+
+
+boost::property_tree::ptree makeTree(const std::tuple<unsigned long long, double, KSPConvergedReason, PetscInt, PetscReal>& resultsTuple) {
+    boost::property_tree::ptree tree;
+    auto [runtime, elapsed, reason, iterations, residualNorm] = resultsTuple;
+
+    tree.add("runtime", runtime); // Microseconds
+    tree.add("converged_reason", static_cast<int>(reason));
+    tree.add("iterations", iterations);
+    tree.add("residual_norm", residualNorm);
+    tree.add("converged", reason > 0);
+    tree.add("elapsed", elapsed);
+
+    return tree;
+}
+
+
+int main(int argc, char** argv) {
+
     namespace po = boost::program_options;
     po::options_description desc("Run matrix benchmark.");
     desc.add_options()("help", "Produce this help message.")(
@@ -196,80 +306,12 @@ int main(int argc, char** argv)
     const auto xFilename = vm["initial-guess-file"].as<std::string>();
     const auto rhsFilename = vm["rhs-file"].as<std::string>();
 
-    // Initialize PETSc
-    PetscInitialize(&argc, &argv, 0, PETSC_NULLPTR);
 
-    // Read matrix and vectors
-    Mat A = readMatrix(matrixFilename);
-    Vec b = readVector(rhsFilename);
-    Vec x;
-    if (!xFilename.empty())
-        x = readVector(xFilename);
-    else {
-        VecDuplicate(b, &x);
-    }
+    auto tree = boost::property_tree::ptree();
+    auto runtimePETSC = makeTree(solveWithPETScAMGx(argc, argv, matrixFilename, rhsFilename, xFilename));
+    tree.add_child("PETSCAMGX", runtimePETSC);
+    boost::property_tree::write_json(std::cout, tree, true);
 
-    // Create KSP solver and set operators
-    KSP ksp;
-    KSPCreate(PETSC_COMM_WORLD, &ksp);
-    //KSPSetType(ksp, KSPBCGS);
-    KSPSetOperators(ksp, A, A);
-
-    // Get the Preconditioner and set it to use AmgX
-    PC pc;
-    KSPGetPC(ksp, &pc);
-    PCSetType(pc, PCAMGX);
-    KSPSetTolerances(ksp, 1.e-5, PETSC_DEFAULT, PETSC_DEFAULT, PETSC_DEFAULT);
-
-    // Configure AmgX solver
-    //PetscOptionsSetValue(NULL, "-pc_amgx_amg_method", "AGGREGATION");
-    //PetscOptionsSetValue(NULL, "-pc_amgx_smoother", "BLOCK_JACOBI");
-    //PetscOptionsSetValue(NULL, "-pc_amgx_smoother", "MULTICOLOR_DILU");
-    PetscOptionsSetValue(NULL, "-pc_amgx_verbose", "True");
-    PetscOptionsSetValue(NULL, "-pc_amgx_print_grid_stats", "True");
-    //PetscOptionsSetValue(NULL, "-pc_amgx_selector", "SIZE_2");
-    //PetscOptionsSetValue(NULL, "-pc_amgx_strength_threshold", "0.3");
-    
- 
-
-    KSPSetFromOptions(ksp);
-    PCSetFromOptions(pc);
-    
-    if (!xFilename.empty()) {
-        KSPSetInitialGuessNonzero(ksp, xFilename.empty() ? PETSC_FALSE : PETSC_TRUE);
-    }
-    KSPSetUp(ksp);
-    PCSetUp(pc);
-    KSPView(ksp, PETSC_VIEWER_STDOUT_WORLD);
-
-    // Solve the system
-    KSPSolve(ksp, b, x);
-    
-    
-    
-    // Check for convergence
-    KSPConvergedReason reason;
-    KSPGetConvergedReason(ksp, &reason);
-
-    PetscReal norm;
-    KSPGetResidualNorm(ksp, &norm);
-    PetscPrintf(PETSC_COMM_WORLD, "Norm: %f \n", norm);
-
-    if (reason < 0) {
-        PetscInt its;
-        KSPGetIterationNumber(ksp, &its);
-        PetscPrintf(PETSC_COMM_WORLD, "KSP did not converge. It used %d iterations.\n", its);
-    } else {
-        PetscInt its;
-        KSPGetIterationNumber(ksp, &its);
-        PetscPrintf(PETSC_COMM_WORLD, "KSP Converged in %d iterations.\n", its);
-    }
-    
-    // Cleanup
-    MatDestroy(&A);
-    VecDestroy(&b);
-    VecDestroy(&x);
-    KSPDestroy(&ksp);
-    PetscFinalize();
     return 0;
 }
+

@@ -132,3 +132,14 @@ Example output
 }
 
 ```
+
+
+Running AMGX
+```bash
+./linearsolverlab_amgx_OPM_matrix     -x ../examples/cpr_matrices/spe1/coarse_rhs.mm     -y  ../examples/cpr_matrices/spe1/coarse_rhs.mm      -m  ../examples/cpr_matrices/spe1/coarsematrix.mm -pc_amgx_smoother MULTICOLOR_DILU
+```
+
+Running Hypre BoomerAMG
+```bash
+./linearsolverlab_petsc -x ../examples/cpr_matrices/spe1/coarse_rhs.mm -y  ../examples/cpr_matrices/spe1/coarse_rhs.mm -A  ../examples/cpr_matrices/spe1/coarsematrix.mm -pc_type hypre -pc_hypre_type boomeramg -use_gpu_aware_mpi 0 -vec_type cuda -mat_type aijcusparse
+```
