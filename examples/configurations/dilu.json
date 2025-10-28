@@ -4,6 +4,6 @@
     "verbosity": "0",
     "solver": "bicgstab",
     "preconditioner": {
-        "type": "ILU0"
+        "type": "dilu"
     }
 }

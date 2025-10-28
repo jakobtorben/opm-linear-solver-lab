@@ -7,11 +7,15 @@
 #include <dune/istl/preconditioners.hh>
 #include <dune/istl/solvers.hh>
 
+#include <opm/simulators/linalg/FlexibleSolver.hpp>
 #include <opm/simulators/linalg/PreconditionerFactory.hpp>
 #include <opm/simulators/linalg/PropertyTree.hpp>
+#include <opm/simulators/linalg/FlowLinearSolverParameters.hpp>
+#include <opm/models/utils/parametersystem.hpp>
 #pragma GCC push
 #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
 #include <opm/simulators/linalg/gpuistl/GpuSeqILU0.hpp>
+#include <opm/simulators/linalg/gpuistl/GpuSparseMatrixWrapper.hpp>
 #include <opm/simulators/linalg/gpuistl/GpuVector.hpp>
 #include <opm/simulators/linalg/gpuistl/PreconditionerAdapter.hpp>
 #pragma GCC pop
@@ -21,11 +25,11 @@
 
 #include <fmt/format.h>
 
-#include <limits>
-#include <memory>
-#include <random>
-
 #include <boost/program_options.hpp>
+
+#if HAVE_AMGX
+#include <amgx_c.h>
+#endif
 
 #include "read_binary.hpp"
 
@@ -68,176 +72,106 @@ readMatrix(const std::string& filename)
     }
 }
 
-template <class X>
-class OnlyPreconditionSolver : public Dune::IterativeSolver<X, X>
-{
-public:
-    using typename Dune::IterativeSolver<X, X>::domain_type;
-    using typename Dune::IterativeSolver<X, X>::range_type;
-    using typename Dune::IterativeSolver<X, X>::field_type;
-    using typename Dune::IterativeSolver<X, X>::real_type;
-
-    void apply(X& x, X& b, double reduction, Dune::InverseOperatorResult& res) override
-    {
-        return apply(x, b, res);
-    }
-
-    // copy base class constructors
-    using Dune::IterativeSolver<X, X>::IterativeSolver;
-    void apply(X& x, X& b, Dune::InverseOperatorResult& res) override
-    {
-        _prec->pre(x, b); // prepare preconditioner
-        _prec->apply(x, b);
-        _prec->post(x);
-
-        res.converged = true;
-        res.iterations = 1;
-    }
-
-protected:
-    using Dune::IterativeSolver<X, X>::_prec;
-};
-
-template <int dim, template <class> class Solver = Dune::BiCGSTABSolver, class T = double>
+// Unified solver using FlexibleSolver for both CPU and GPU
+// This mirrors the ISTLSolverGPUISTL architecture in OPM Flow
+// - Accepts standard solver names: "bicgstab", "loopsolver", "gmres"
+// - Same config format works for both CPU and GPU
+// - GPU path automatically handles matrix/vector conversion
+// - For preconditioner-only benchmarking, use "loopsolver" with "maxiter": 1
+template <int dim, class T = double>
 std::tuple<unsigned long long, Dune::InverseOperatorResult, bool>
-readAndSolveCPU(const auto jsonConfigCPUFilename,
-                const auto xFilename,
-                const auto matrixFilename,
-                const auto rhsFilename)
+readAndSolve(const std::string& configFilename,
+             const std::string& xFilename,
+             const std::string& matrixFilename,
+             const std::string& rhsFilename,
+             const std::string& accelerator)
 {
     using M = Opm::MatrixBlock<T, dim, dim>;
     using SpMatrix = Dune::BCRSMatrix<M>;
-    using Vector = Dune::BlockVector<Dune::FieldVector<T, dim>>;
-    using CuILU0 = Opm::gpuistl::GpuSeqILU0<SpMatrix, Opm::gpuistl::GpuVector<T>, Opm::gpuistl::GpuVector<T>>;
-    using Operator = Dune::MatrixAdapter<SpMatrix, Vector, Vector>;
-    using PrecFactory = Opm::PreconditionerFactory<Operator, Dune::Amg::SequentialInformation>;
+    using CPUVector = Dune::BlockVector<Dune::FieldVector<T, dim>>;
 
-    Opm::PropertyTree configurationCPU(jsonConfigCPUFilename);
-    bool transpose = false;
-    if (configurationCPU.get<std::string>("preconditioner.type") == "cprt") {
-        transpose = true;
-    }
+    Opm::PropertyTree configuration(configFilename);
 
     auto B = readMatrix<SpMatrix>(matrixFilename);
-    auto x = readVector<Vector>(xFilename);
-    auto rhs = readVector<Vector>(xFilename);
-    auto BCPUOperator = std::make_shared<Dune::MatrixAdapter<SpMatrix, Vector, Vector>>(B);
-
-    auto wc = []() -> Vector {
-        throw std::runtime_error("getQuasiImpesWeights is not supported in the benchmarking library.");
-        return Vector();
-    };
-
-
-    const size_t N = B.N();
-
-    auto precCPU = PrecFactory::create(*BCPUOperator, configurationCPU.get_child("preconditioner"), wc, 1);
-    Dune::InverseOperatorResult resultCPU;
-
-    auto scalarProductCPU = std::make_shared<Dune::SeqScalarProduct<Vector>>();
-
-    auto solverCPU = Solver<Vector>(BCPUOperator,
-                                    scalarProductCPU,
-                                    precCPU,
-                                    configurationCPU.get<double>("tol"),
-                                    configurationCPU.get<int>("maxiter"),
-                                    configurationCPU.get<int>("verbosity"));
-
-    auto cpuStart = std::chrono::high_resolution_clock::now();
-    solverCPU.apply(x, rhs, resultCPU);
-    auto cpuEnd = std::chrono::high_resolution_clock::now();
-
-
-    const auto duration = std::chrono::duration_cast<std::chrono::microseconds>(cpuEnd - cpuStart);
-    return std::make_tuple(duration.count(), resultCPU, false);
-}
-template <int dim, template <class> class Solver = Dune::BiCGSTABSolver, class T = double>
-std::tuple<unsigned long long, Dune::InverseOperatorResult, bool>
-readAndSolveGPU(const auto jsonConfigGPUFilename,
-                const auto xFilename,
-                const auto matrixFilename,
-                const auto rhsFilename)
-{
-    using M = Opm::MatrixBlock<T, dim, dim>;
-    using SpMatrix = Dune::BCRSMatrix<M>;
-    using Vector = Dune::BlockVector<Dune::FieldVector<T, dim>>;
-    using CuILU0 = Opm::gpuistl::GpuSeqILU0<SpMatrix, Opm::gpuistl::GpuVector<T>, Opm::gpuistl::GpuVector<T>>;
-    using GPUVector = Opm::gpuistl::GpuVector<T>;
-    using Operator = Dune::MatrixAdapter<SpMatrix, Vector, Vector>;
-    using PrecFactory = Opm::PreconditionerFactory<Operator, Dune::Amg::SequentialInformation>;
-
-    Opm::PropertyTree configurationGPU(jsonConfigGPUFilename);
-
-    auto B = readMatrix<SpMatrix>(matrixFilename);
-    auto x = readVector<Vector>(xFilename);
-    auto rhs = readVector<Vector>(xFilename);
-
-    auto BCPUOperator = std::make_shared<Dune::MatrixAdapter<SpMatrix, Vector, Vector>>(B);
-
-    auto wc = []() -> Vector {
-        throw std::runtime_error("getQuasiImpesWeights is not supported in the benchmarking library.");
-        return Vector();
-    };
-
-
-
-    const size_t N = B.N();
+    auto x = readVector<CPUVector>(xFilename);
+    auto rhs = readVector<CPUVector>(rhsFilename);
 
     Dune::InverseOperatorResult result;
+    bool failed = false;
+    unsigned long long duration_us = 0;
 
-    auto BonGPU = Opm::gpuistl::GpuSparseMatrix<T>::fromMatrix(B);
-    auto BOperator = std::make_shared<
-        Dune::MatrixAdapter<Opm::gpuistl::GpuSparseMatrix<T>, Opm::gpuistl::GpuVector<T>, Opm::gpuistl::GpuVector<T>>>(
-        BonGPU);
+    if (accelerator == "cpu") {
+        using CPUOperator = Dune::MatrixAdapter<SpMatrix, CPUVector, CPUVector>;
+        using CPUFlexibleSolver = Dune::FlexibleSolver<CPUOperator>;
 
-    auto precGPUWrapped = PrecFactory::create(*BCPUOperator, configurationGPU.get_child("preconditioner"), wc, 1);
+        auto wc = []() -> CPUVector {
+            throw std::runtime_error("getQuasiImpesWeights is not supported in the benchmarking library.");
+            return CPUVector();
+        };
 
-    auto precAsHolder = std::dynamic_pointer_cast<
-        Opm::gpuistl::PreconditionerHolder<Opm::gpuistl::GpuVector<T>, Opm::gpuistl::GpuVector<T>>>(precGPUWrapped);
-    if (!precAsHolder) {
-        OPM_THROW(std::invalid_argument,
-                  "The preconditioner needs to be a CUDA preconditioner wrapped in a "
-                  "Opm::gpuistl::PreconditionerHolder (eg. CuILU0).");
+        try {
+            auto BOperator = std::make_shared<CPUOperator>(B);
+            auto solver = CPUFlexibleSolver(*BOperator, configuration, wc, 0);
+
+            auto start = std::chrono::high_resolution_clock::now();
+            solver.apply(x, rhs, result);
+            auto end = std::chrono::high_resolution_clock::now();
+
+            duration_us = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+        } catch (const std::exception& e) {
+            std::cerr << "CPU solver failed: " << e.what() << "\n";
+            failed = true;
+        }
+    } else if (accelerator == "gpu") {
+        using GPUMatrix = Opm::gpuistl::GpuSparseMatrixWrapper<T>;
+        using GPUVector = Opm::gpuistl::GpuVector<T>;
+        using GPUOperator = Dune::MatrixAdapter<GPUMatrix, GPUVector, GPUVector>;
+        using GPUFlexibleSolver = Dune::FlexibleSolver<GPUOperator>;
+
+        auto wc = []() -> GPUVector {
+            throw std::runtime_error("getQuasiImpesWeights is not supported in the benchmarking library.");
+            return GPUVector(0);
+        };
+
+        try {
+            // Convert matrix to GPU
+            auto BonGPU = GPUMatrix::fromMatrix(B);
+            auto BOperator = std::make_shared<GPUOperator>(BonGPU);
+
+            // Create FlexibleSolver
+            auto solver = GPUFlexibleSolver(*BOperator, configuration, wc, 0);
+
+            // Convert vectors to GPU
+            auto xOnGPU = GPUVector(x);
+            auto rhsOnGPU = GPUVector(rhs);
+
+            auto start = std::chrono::high_resolution_clock::now();
+            solver.apply(xOnGPU, rhsOnGPU, result);
+            OPM_GPU_SAFE_CALL(cudaDeviceSynchronize());
+            auto end = std::chrono::high_resolution_clock::now();
+
+            duration_us = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+        } catch (const std::exception& e) {
+            std::cerr << "GPU solver failed: " << e.what() << "\n";
+            failed = true;
+        }
+    } else {
+        throw std::runtime_error("Invalid accelerator: " + accelerator);
     }
-    auto preconditionerOnGPU = precAsHolder->getUnderlyingPreconditioner();
 
-    auto scalarProduct = std::make_shared<Dune::SeqScalarProduct<Opm::gpuistl::GpuVector<T>>>();
-    auto solver = Solver<Opm::gpuistl::GpuVector<T>>(BOperator,
-                                                   scalarProduct,
-                                                   preconditionerOnGPU,
-                                                   configurationGPU.get<double>("tol"),
-                                                   configurationGPU.get<int>("maxiter"),
-                                                   configurationGPU.get<int>("verbosity"));
-
-
-    auto xOnGPU = GPUVector(x.dim());
-    xOnGPU.copyFromHost(x);
-
-    auto rhsOnGPU = GPUVector(rhs.dim());
-    rhsOnGPU.copyFromHost(rhs);
-
-    bool gpufailed = false;
-
-    auto gpuStart = std::chrono::high_resolution_clock::now();
-    try {
-        solver.apply(xOnGPU, rhsOnGPU, result);
-    } catch (const std::logic_error& e) {
-        gpufailed = true;
-    }
-
-    OPM_GPU_SAFE_CALL(cudaDeviceSynchronize());
-    auto gpuEnd = std::chrono::high_resolution_clock::now();
-
-    const auto duration = std::chrono::duration_cast<std::chrono::microseconds>(gpuEnd - gpuStart);
-    return std::make_tuple(duration.count(), result, gpufailed);
+    return std::make_tuple(duration_us, result, failed);
 }
 
-boost::property_tree::ptree
-makeTree(const std::tuple<unsigned long long, Dune::InverseOperatorResult, bool>& resultstuple)
+
+void
+printResults(const std::string& accelerator,
+             unsigned long long runtime_us,
+             const Dune::InverseOperatorResult& result,
+             bool failed)
 {
     boost::property_tree::ptree tree;
-    auto [runtime, result, failed] = resultstuple;
-    tree.add("runtime", runtime);
+    tree.add("accelerator", accelerator);
+    tree.add("runtime_us", runtime_us);
     tree.add("failed_by_exception", failed);
     tree.add("iterations", result.iterations);
     tree.add("reduction", result.reduction);
@@ -246,64 +180,6 @@ makeTree(const std::tuple<unsigned long long, Dune::InverseOperatorResult, bool>
     tree.add("elapsed", result.elapsed);
     tree.add("condition_estimate", result.condition_estimate);
 
-    return tree;
-}
-
-template <int dim, class T = double>
-void
-readAndSolve(const auto jsonConfigCPUFilename,
-             const auto jsonConfigGPUFilename,
-             const auto xFilename,
-             const auto matrixFilename,
-             const auto rhsFilename,
-             bool runCPU = true,
-             bool runGPU = true)
-{
-    auto tree = boost::property_tree::ptree();
-
-    if (runCPU) {
-        Opm::PropertyTree configurationCPU(jsonConfigCPUFilename);
-        auto solverNameCPU = configurationCPU.get<std::string>("solver");
-
-        if (solverNameCPU != "bicgstab" && solverNameCPU != "onlypreconditioner") {
-            throw std::runtime_error(
-                fmt::format("We only support bicgstab and onlypreconditioner, but given {}.", solverNameCPU));
-        }
-
-        if (solverNameCPU == "bicgstab") {
-            auto runtimeCPU = makeTree(readAndSolveCPU<dim, Dune::BiCGSTABSolver>(
-                jsonConfigCPUFilename, xFilename, matrixFilename, rhsFilename));
-
-            tree.add_child("CPU", runtimeCPU);
-        } else {
-            const auto runtimeCPU = makeTree(readAndSolveCPU<dim, OnlyPreconditionSolver>(
-                jsonConfigCPUFilename, xFilename, matrixFilename, rhsFilename));
-
-            tree.add_child("CPU", runtimeCPU);
-        }
-    }
-    if (runGPU) {
-        Opm::PropertyTree configurationGPU(jsonConfigGPUFilename);
-        auto solverNameGPU = configurationGPU.get<std::string>("solver");
-
-        if (solverNameGPU != "cubicgstab" && solverNameGPU != "onlypreconditioner") {
-            throw std::runtime_error(fmt::format(
-                "We only support cubicgstab and onlypreconditioner for the GPU, but given {}.", solverNameGPU));
-        }
-
-        if (solverNameGPU == "cubicgstab") {
-            const auto runtimeGPU = makeTree(readAndSolveGPU<dim, Dune::BiCGSTABSolver>(
-                jsonConfigGPUFilename, xFilename, matrixFilename, rhsFilename));
-            tree.add_child("GPU", runtimeGPU);
-
-        } else {
-            const auto runtimeGPU = makeTree(readAndSolveGPU<dim, OnlyPreconditionSolver>(
-                jsonConfigGPUFilename, xFilename, matrixFilename, rhsFilename));
-            tree.add_child("GPU", runtimeGPU);
-        }
-    }
-
-
     boost::property_tree::write_json(std::cout, tree, true);
 }
 
@@ -311,73 +187,69 @@ readAndSolve(const auto jsonConfigCPUFilename,
 int
 main(int argc, char** argv)
 {
-
     [[maybe_unused]] const auto& helper = Dune::MPIHelper::instance(argc, argv);
 
+#if HAVE_AMGX
+    AMGX_SAFE_CALL(AMGX_initialize());
+#endif
+
+    // Register OPM parameters that preconditioners might need
+    // These are Flow parameters that AMGX and other preconditioners may access
+    // Default values are taken from the parameter structs (e.g., CprReuseInterval::value = 30)
+    Opm::Parameters::Register<Opm::Parameters::CprReuseInterval>
+        ("Reuse preconditioner interval");
+
+    // Close parameter registration - required before retrieving any parameters
+    Opm::Parameters::endRegistration();
+
     namespace po = boost::program_options;
-    po::options_description desc("Run matrix benchmark.");
-    desc.add_options()("help", "Produce this help message.")(
-        "matrix-file,m", po::value<std::string>()->required(), "Matrix filename.")(
-        "initial-guess-file,x", po::value<std::string>()->required(), "x (initial guess) filename.")(
-        "rhs-file,y", po::value<std::string>()->required(), "y (right hand side) filename.")(
-        "configfile-cpu,c", po::value<std::string>(), "Configuration file for the linear solver on the CPU (.json)")(
-        "configfile-gpu,g", po::value<std::string>(), "Configuration file for the linear solver on the GPU (.json)")(
-        "block-size,b", po::value<size_t>(), "Block size to use. This is required for binary files.");
+    po::options_description desc("OPM Linear Solver Benchmarking Tool");
+    desc.add_options()("help,h", "Produce this help message")(
+        "matrix-file,m", po::value<std::string>()->required(), "Matrix filename (.mm or .bin)")(
+        "initial-guess-file,x", po::value<std::string>()->required(), "Initial guess filename")(
+        "rhs-file,y", po::value<std::string>()->required(), "Right-hand side filename")(
+        "configfile", po::value<std::string>()->required(), "Solver configuration file (.json)")(
+        "linear-solver-accelerator",
+        po::value<std::string>()->default_value("cpu"),
+        "Linear solver accelerator: 'cpu' or 'gpu' (default: cpu)")(
+        "block-size,b", po::value<size_t>(), "Block size (required for binary files)");
 
     po::variables_map vm;
 
     try {
         po::store(po::parse_command_line(argc, argv, desc), vm);
 
+        if (vm.count("help")) {
+            std::cout << desc << "\n\n";
+            std::cout << "Example usage:\n";
+            std::cout << "  " << argv[0] << " -m matrix.mm -x init.mm -y rhs.mm --configfile config.json\n";
+            std::cout
+                << "  " << argv[0]
+                << " -m matrix.mm -x init.mm -y rhs.mm --configfile config.json --linear-solver-accelerator gpu\n";
+            return EXIT_SUCCESS;
+        }
+
         po::notify(vm);
-    } catch (const po::required_option& error) {
-        std::cout << "Usage:\n\t" << argv[0]
-                  << " -m <path to matrix file> -x <path to initial guess file> -y "
-                     "<path to rhs file>"
-                  << std::endl
-                  << std::endl;
-
-        std::cout << desc << std::endl;
-
-        std::exit(EXIT_FAILURE);
-    } catch (std::runtime_error& error) {
-        std::cout << error.what() << std::endl;
-        std::cout << "Usage:\n\t" << argv[0]
-                  << " -m <path to matrix file> -x <path to initial guess file> -y "
-                     "<path to rhs file>"
-                  << std::endl
-                  << std::endl;
-
-        std::cout << desc << std::endl;
-
-        std::exit(EXIT_FAILURE);
+    } catch (const po::error& e) {
+        std::cerr << "Error: " << e.what() << "\n\n";
+        std::cerr << desc << "\n";
+        return EXIT_FAILURE;
     }
 
-    if (vm.count("help")) {
-        std::cout << desc << "\n";
-        std::exit(EXIT_FAILURE);
-    }
-    const bool runCPU = vm.count("configfile-cpu") > 0;
-    const bool runGPU = vm.count("configfile-gpu") > 0;
-    if (!runGPU && !runCPU) {
-        std::cerr << "You need to specify at least one of --configfile-cpu or --configfile-gpu\n";
-        std::cout << desc << "\n";
-        std::exit(EXIT_FAILURE);
-    }
-
+    // Get command-line arguments
     const auto matrixFilename = vm["matrix-file"].as<std::string>();
     const auto xFilename = vm["initial-guess-file"].as<std::string>();
     const auto rhsFilename = vm["rhs-file"].as<std::string>();
-    auto jsonConfigFileCPU = std::string("");
-    if (runCPU) {
-        jsonConfigFileCPU = vm["configfile-cpu"].as<std::string>();
+    const auto configFilename = vm["configfile"].as<std::string>();
+    const auto accelerator = vm["linear-solver-accelerator"].as<std::string>();
+
+    // Validate accelerator
+    if (accelerator != "cpu" && accelerator != "gpu") {
+        std::cerr << "Error: Invalid accelerator '" << accelerator << "'. Must be 'cpu' or 'gpu'.\n";
+        return EXIT_FAILURE;
     }
 
-    auto jsonConfigFileGPU = std::string("");
-    if (runGPU) {
-        jsonConfigFileGPU = vm["configfile-gpu"].as<std::string>();
-    }
-
+    // Determine block size
     size_t dim = 2;
     if (vm.count("block-size")) {
         dim = vm["block-size"].as<size_t>();
@@ -387,30 +259,58 @@ main(int argc, char** argv)
         const std::string lineToFind = "% ISTL_STRUCT blocked";
         while (std::getline(matrixfile, line)) {
             if (line.substr(0, lineToFind.size()) == lineToFind) {
-                dim = std::atoi(line.substr(lineToFind.size() + 2).c_str()); // Yeah, max 9
+                dim = std::atoi(line.substr(lineToFind.size() + 2).c_str());
                 break;
             }
         }
     } else {
-        std::cerr << "You have to specify a .mm (ascii) matrix file or specify --block-size\n";
-        std::cout << desc << "\n";
-        std::exit(EXIT_FAILURE);
+        std::cerr << "Error: For binary files, you must specify --block-size\n";
+        return EXIT_FAILURE;
     }
 
-    switch (dim) {
-    case 1:
-        readAndSolve<1>(jsonConfigFileCPU, jsonConfigFileGPU, xFilename, matrixFilename, rhsFilename, runCPU, runGPU);
-        break;
-    case 2:
-        readAndSolve<2>(jsonConfigFileCPU, jsonConfigFileGPU, xFilename, matrixFilename, rhsFilename, runCPU, runGPU);
-        break;
-    case 3:
-        readAndSolve<3>(jsonConfigFileCPU, jsonConfigFileGPU, xFilename, matrixFilename, rhsFilename, runCPU, runGPU);
-        break;
-    case 4:
-        readAndSolve<4>(jsonConfigFileCPU, jsonConfigFileGPU, xFilename, matrixFilename, rhsFilename, runCPU, runGPU);
-        break;
-    default:
-        throw std::runtime_error("Unresolved matrix dimension " + std::to_string(dim));
+    // Run solver based on block size
+    try {
+        std::tuple<unsigned long long, Dune::InverseOperatorResult, bool> result;
+
+        switch (dim) {
+        case 1:
+            result = readAndSolve<1>(configFilename, xFilename, matrixFilename, rhsFilename, accelerator);
+            break;
+        case 2:
+            result = readAndSolve<2>(configFilename, xFilename, matrixFilename, rhsFilename, accelerator);
+            break;
+        case 3:
+            result = readAndSolve<3>(configFilename, xFilename, matrixFilename, rhsFilename, accelerator);
+            break;
+        case 4:
+            result = readAndSolve<4>(configFilename, xFilename, matrixFilename, rhsFilename, accelerator);
+            break;
+        default:
+            std::cerr << "Error: Unsupported block dimension " << dim << "\n";
+
+#if HAVE_AMGX
+            AMGX_SAFE_CALL(AMGX_finalize());
+#endif
+
+            return EXIT_FAILURE;
+        }
+
+        auto [runtime_us, solve_result, failed] = result;
+        printResults(accelerator, runtime_us, solve_result, failed);
+
+#if HAVE_AMGX
+        AMGX_SAFE_CALL(AMGX_finalize());
+#endif
+
+        return failed ? EXIT_FAILURE : EXIT_SUCCESS;
+
+    } catch (const std::exception& e) {
+        std::cerr << "Error: " << e.what() << "\n";
+
+#if HAVE_AMGX
+        AMGX_SAFE_CALL(AMGX_finalize());
+#endif
+
+        return EXIT_FAILURE;
     }
 }

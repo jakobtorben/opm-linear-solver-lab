@@ -9,6 +9,7 @@ option(OPM_REQUIRES_DAMARIS OFF)
 option(OPM_REQUIRES_VEXCL OFF)
 
 list(APPEND CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake/Modules)
+list(APPEND CMAKE_MODULE_PATH /home/jakob/code/opm/src/opm-common/cmake/Modules)
 
 find_package(CUDAToolkit REQUIRED)
 find_package(TBB REQUIRED)
@@ -16,6 +17,24 @@ find_package(dune-common REQUIRED)
 find_package(dune-grid REQUIRED)
 find_package(dune-geometry REQUIRED)
 find_package(dune-istl REQUIRED)
+
+find_package(HYPRE REQUIRED)
+find_package(AMGX)
+find_package(OpenMP REQUIRED)
+find_package(VexCL)
+
+if(VexCL_FOUND)
+  get_property(VEXCL_INCLUDE_DIRS TARGET VexCL::Common PROPERTY INTERFACE_INCLUDE_DIRECTORIES)
+  get_property(VEXCL_LINK_LIBRARIES TARGET VexCL::Common PROPERTY INTERFACE_LINK_LIBRARIES)
+  get_property(VEXCL_COMPILE_DEFINITIONS TARGET VexCL::OpenCL PROPERTY INTERFACE_COMPILE_DEFINITIONS)
+  set(VEXCL_LINK_LIBRARIES "${VEXCL_LINK_LIBRARIES};OpenCL::OpenCL")
+  add_library(OPM::VexCL::OpenCL INTERFACE IMPORTED)
+  set_target_properties(OPM::VexCL::OpenCL PROPERTIES
+    INTERFACE_COMPILE_DEFINITIONS "${VEXCL_COMPILE_DEFINITIONS}"
+    INTERFACE_LINK_LIBRARIES "${VEXCL_LINK_LIBRARIES}")
+  target_include_directories(OPM::VexCL::OpenCL SYSTEM INTERFACE "${VEXCL_INCLUDE_DIRS}")
+endif()
+
 find_package(opm-simulators REQUIRED)
 find_package(fmt REQUIRED)
 find_package(Petsc)
