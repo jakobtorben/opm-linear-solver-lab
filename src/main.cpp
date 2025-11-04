@@ -1,3 +1,5 @@
+#include "config.hpp"
+
 #include <boost/property_tree/json_parser.hpp>
 #include <boost/property_tree/ptree.hpp>
 #include <dune/common/parallel/mpihelper.hh>
@@ -24,13 +26,9 @@
 #include <opm/simulators/linalg/matrixblock.hh>
 
 #include <fmt/format.h>
-
 #include <boost/program_options.hpp>
 
-#if HAVE_AMGX
-#include <amgx_c.h>
-#endif
-
+#include "library_initializer.hpp"
 #include "read_binary.hpp"
 
 template <class VectorType>
@@ -92,7 +90,7 @@ readAndSolve(const std::string& configFilename,
 
     Opm::PropertyTree configuration(configFilename);
 
-    auto B = readMatrix<SpMatrix>(matrixFilename);
+    auto Matrix = readMatrix<SpMatrix>(matrixFilename);
     auto x = readVector<CPUVector>(xFilename);
     auto rhs = readVector<CPUVector>(rhsFilename);
 
@@ -104,14 +102,16 @@ readAndSolve(const std::string& configFilename,
         using CPUOperator = Dune::MatrixAdapter<SpMatrix, CPUVector, CPUVector>;
         using CPUFlexibleSolver = Dune::FlexibleSolver<CPUOperator>;
 
-        auto wc = []() -> CPUVector {
-            throw std::runtime_error("getQuasiImpesWeights is not supported in the benchmarking library.");
-            return CPUVector();
+        auto wc = [&Matrix]() -> CPUVector {
+            // Dummy weight function for testing - returns a vector of ones
+            CPUVector weights(Matrix.N());
+            weights = 1.0;
+            return weights;
         };
 
         try {
-            auto BOperator = std::make_shared<CPUOperator>(B);
-            auto solver = CPUFlexibleSolver(*BOperator, configuration, wc, 0);
+            auto MatrixOperator = std::make_shared<CPUOperator>(Matrix);
+            auto solver = CPUFlexibleSolver(*MatrixOperator, configuration, wc, 0);
 
             auto start = std::chrono::high_resolution_clock::now();
             solver.apply(x, rhs, result);
@@ -128,18 +128,20 @@ readAndSolve(const std::string& configFilename,
         using GPUOperator = Dune::MatrixAdapter<GPUMatrix, GPUVector, GPUVector>;
         using GPUFlexibleSolver = Dune::FlexibleSolver<GPUOperator>;
 
-        auto wc = []() -> GPUVector {
-            throw std::runtime_error("getQuasiImpesWeights is not supported in the benchmarking library.");
-            return GPUVector(0);
+        auto wc = [&Matrix]() -> GPUVector {
+            // Dummy weight function for testing - returns a vector of ones
+            CPUVector cpu_weights(Matrix.N());
+            cpu_weights = 1.0;
+            return GPUVector(cpu_weights);
         };
 
         try {
             // Convert matrix to GPU
-            auto BonGPU = GPUMatrix::fromMatrix(B);
-            auto BOperator = std::make_shared<GPUOperator>(BonGPU);
+            auto MatrixOnGPU = GPUMatrix::fromMatrix(Matrix);
+            auto MatrixOperator = std::make_shared<GPUOperator>(MatrixOnGPU);
 
             // Create FlexibleSolver
-            auto solver = GPUFlexibleSolver(*BOperator, configuration, wc, 0);
+            auto solver = GPUFlexibleSolver(*MatrixOperator, configuration, wc, 0);
 
             // Convert vectors to GPU
             auto xOnGPU = GPUVector(x);
@@ -183,15 +185,11 @@ printResults(const std::string& accelerator,
     boost::property_tree::write_json(std::cout, tree, true);
 }
 
-
 int
 main(int argc, char** argv)
 {
-    [[maybe_unused]] const auto& helper = Dune::MPIHelper::instance(argc, argv);
-
-#if HAVE_AMGX
-    AMGX_SAFE_CALL(AMGX_initialize());
-#endif
+    // RAII: Initialize all libraries - automatically cleaned up on scope exit
+    LibraryInitializer init(argc, argv);
 
     // Register OPM parameters that preconditioners might need
     // These are Flow parameters that AMGX and other preconditioners may access
@@ -287,30 +285,15 @@ main(int argc, char** argv)
             break;
         default:
             std::cerr << "Error: Unsupported block dimension " << dim << "\n";
-
-#if HAVE_AMGX
-            AMGX_SAFE_CALL(AMGX_finalize());
-#endif
-
             return EXIT_FAILURE;
         }
 
         auto [runtime_us, solve_result, failed] = result;
         printResults(accelerator, runtime_us, solve_result, failed);
-
-#if HAVE_AMGX
-        AMGX_SAFE_CALL(AMGX_finalize());
-#endif
-
         return failed ? EXIT_FAILURE : EXIT_SUCCESS;
 
     } catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << "\n";
-
-#if HAVE_AMGX
-        AMGX_SAFE_CALL(AMGX_finalize());
-#endif
-
         return EXIT_FAILURE;
     }
 }

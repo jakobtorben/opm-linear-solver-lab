@@ -9,8 +9,8 @@ option(OPM_REQUIRES_DAMARIS OFF)
 option(OPM_REQUIRES_VEXCL OFF)
 
 list(APPEND CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake/Modules)
-list(APPEND CMAKE_MODULE_PATH /home/jakob/code/opm/src/opm-common/cmake/Modules)
 
+find_package(MPI)
 find_package(CUDAToolkit REQUIRED)
 find_package(TBB REQUIRED)
 find_package(dune-common REQUIRED)
@@ -18,8 +18,6 @@ find_package(dune-grid REQUIRED)
 find_package(dune-geometry REQUIRED)
 find_package(dune-istl REQUIRED)
 
-find_package(HYPRE REQUIRED)
-find_package(AMGX)
 find_package(OpenMP REQUIRED)
 find_package(VexCL)
 
@@ -35,16 +33,24 @@ if(VexCL_FOUND)
   target_include_directories(OPM::VexCL::OpenCL SYSTEM INTERFACE "${VEXCL_INCLUDE_DIRS}")
 endif()
 
+find_package(HYPRE)
+find_package(AMGX)
+
 find_package(opm-simulators REQUIRED)
 find_package(fmt REQUIRED)
 find_package(Petsc)
 find_package(amgcl)
 
-if (amgcl_FOUND)
-    SET(HAVE_AMGCL ON)
-else()
-    SET(HAVE_AMGCL OFF)
+# HYPRE requires MPI
+if(HYPRE_FOUND AND NOT MPI_FOUND)
+  message(FATAL_ERROR "HYPRE requires MPI. Please install MPI or disable HYPRE.")
 endif()
+
+set(HAVE_AMGX ${AMGX_FOUND})
+set(HAVE_HYPRE ${HYPRE_FOUND})
+set(HAVE_AMGCL ${amgcl_FOUND})
+set(HAVE_CUDA ${CUDAToolkit_FOUND})
+set(HAVE_MPI ${MPI_FOUND})
 
 if (OPM_REQUIRES_DAMARIS)
   find_package(XercesC REQUIRED)
@@ -72,6 +78,11 @@ target_include_directories(linsolverlab PRIVATE
 )
 
 target_link_libraries(linsolverlab PRIVATE opmsimulators Boost::program_options CUDA::cudart fmt::fmt)
+
+if(HAVE_MPI)
+  target_include_directories(linsolverlab PRIVATE ${MPI_CXX_INCLUDE_DIRS})
+  target_link_libraries(linsolverlab PRIVATE MPI::MPI_CXX)
+endif()
 
 if (HAVE_AMGCL)
     target_link_libraries(linsolverlab PRIVATE opmsimulators amgcl::amgcl)
