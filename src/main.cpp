@@ -1,5 +1,6 @@
 #include "config.hpp"
 
+#include <optional>
 #include <boost/property_tree/json_parser.hpp>
 #include <boost/property_tree/ptree.hpp>
 #include <dune/common/parallel/mpihelper.hh>
@@ -82,6 +83,7 @@ readAndSolve(const std::string& configFilename,
              const std::string& xFilename,
              const std::string& matrixFilename,
              const std::string& rhsFilename,
+             const std::string& weightsFilename,
              const std::string& accelerator)
 {
     using M = Opm::MatrixBlock<T, dim, dim>;
@@ -94,6 +96,12 @@ readAndSolve(const std::string& configFilename,
     auto x = readVector<CPUVector>(xFilename);
     auto rhs = readVector<CPUVector>(rhsFilename);
 
+    // Read CPR weights if provided
+    std::optional<CPUVector> cprWeights;
+    if (!weightsFilename.empty()) {
+        cprWeights = readVector<CPUVector>(weightsFilename);
+    }
+
     Dune::InverseOperatorResult result;
     bool failed = false;
     unsigned long long duration_us = 0;
@@ -102,11 +110,12 @@ readAndSolve(const std::string& configFilename,
         using CPUOperator = Dune::MatrixAdapter<SpMatrix, CPUVector, CPUVector>;
         using CPUFlexibleSolver = Dune::FlexibleSolver<CPUOperator>;
 
-        auto wc = [&Matrix]() -> CPUVector {
-            // Dummy weight function for testing - returns a vector of ones
-            CPUVector weights(Matrix.N());
-            weights = 1.0;
-            return weights;
+        auto wc = [&cprWeights]() -> CPUVector {
+            if (!cprWeights.has_value()) {
+                throw std::runtime_error(
+                    "CPR weights are required but not provided. Use --cpr-weights-file to specify weights file.");
+            }
+            return *cprWeights;
         };
 
         try {
@@ -128,11 +137,12 @@ readAndSolve(const std::string& configFilename,
         using GPUOperator = Dune::MatrixAdapter<GPUMatrix, GPUVector, GPUVector>;
         using GPUFlexibleSolver = Dune::FlexibleSolver<GPUOperator>;
 
-        auto wc = [&Matrix]() -> GPUVector {
-            // Dummy weight function for testing - returns a vector of ones
-            CPUVector cpu_weights(Matrix.N());
-            cpu_weights = 1.0;
-            return GPUVector(cpu_weights);
+        auto wc = [&cprWeights]() -> GPUVector {
+            if (!cprWeights.has_value()) {
+                throw std::runtime_error(
+                    "CPR weights are required but not provided. Use --cpr-weights-file to specify weights file.");
+            }
+            return GPUVector(*cprWeights);
         };
 
         try {
@@ -210,7 +220,8 @@ main(int argc, char** argv)
         "linear-solver-accelerator",
         po::value<std::string>()->default_value("cpu"),
         "Linear solver accelerator: 'cpu' or 'gpu' (default: cpu)")(
-        "block-size,b", po::value<size_t>(), "Block size (required for binary files)");
+        "block-size,b", po::value<size_t>(), "Block size (required for binary files)")(
+        "cpr-weights-file,w", po::value<std::string>(), "CPR weights filename (.mm or .bin) - optional");
 
     po::variables_map vm;
 
@@ -224,6 +235,9 @@ main(int argc, char** argv)
             std::cout
                 << "  " << argv[0]
                 << " -m matrix.mm -x init.mm -y rhs.mm --configfile config.json --linear-solver-accelerator gpu\n";
+            std::cout
+                << "  " << argv[0]
+                << " -m matrix.mm -x init.mm -y rhs.mm -w weights.mm --configfile cpr_config.json\n";
             return EXIT_SUCCESS;
         }
 
@@ -240,6 +254,7 @@ main(int argc, char** argv)
     const auto rhsFilename = vm["rhs-file"].as<std::string>();
     const auto configFilename = vm["configfile"].as<std::string>();
     const auto accelerator = vm["linear-solver-accelerator"].as<std::string>();
+    const auto weightsFilename = vm.count("cpr-weights-file") ? vm["cpr-weights-file"].as<std::string>() : "";
 
     // Validate accelerator
     if (accelerator != "cpu" && accelerator != "gpu") {
@@ -272,16 +287,16 @@ main(int argc, char** argv)
 
         switch (dim) {
         case 1:
-            result = readAndSolve<1>(configFilename, xFilename, matrixFilename, rhsFilename, accelerator);
+            result = readAndSolve<1>(configFilename, xFilename, matrixFilename, rhsFilename, weightsFilename, accelerator);
             break;
         case 2:
-            result = readAndSolve<2>(configFilename, xFilename, matrixFilename, rhsFilename, accelerator);
+            result = readAndSolve<2>(configFilename, xFilename, matrixFilename, rhsFilename, weightsFilename, accelerator);
             break;
         case 3:
-            result = readAndSolve<3>(configFilename, xFilename, matrixFilename, rhsFilename, accelerator);
+            result = readAndSolve<3>(configFilename, xFilename, matrixFilename, rhsFilename, weightsFilename, accelerator);
             break;
         case 4:
-            result = readAndSolve<4>(configFilename, xFilename, matrixFilename, rhsFilename, accelerator);
+            result = readAndSolve<4>(configFilename, xFilename, matrixFilename, rhsFilename, weightsFilename, accelerator);
             break;
         default:
             std::cerr << "Error: Unsupported block dimension " << dim << "\n";

@@ -117,10 +117,26 @@ Uses configs from `configurations/solver_adapter/` subfolder:
   -m, --matrix-file arg             Matrix filename (.mm or .bin)
   -x, --initial-guess-file arg      Initial guess filename
   -y, --rhs-file arg                Right-hand side filename
+  -w, --cpr-weights-file arg        CPR weights filename (.mm or .bin) - optional
   --configfile arg                  Solver configuration file (.json)
   --linear-solver-accelerator arg   'cpu' (default) or 'gpu'
   -b, --block-size arg              Block size (required for binary files)
 ```
+
+### CPR Preconditioners
+
+For CPR preconditioners, provide the weights file using `--cpr-weights-file`:
+
+```bash
+./linsolverlab \
+    -m matrix.mm \
+    -x init.mm \
+    -y rhs.mm \
+    -w weights.mm \
+    --configfile cpr_config.json
+```
+
+The weights file should be in MatrixMarket format.
 
 ### Example Output
 
