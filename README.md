@@ -1,6 +1,22 @@
 # opm-linear-solver-lab
 Experimental playground for testing out linear solvers in OPM Flow.
 
+## Linear System in OPM Flow
+
+OPM Flow uses a Newton-Raphson method for solving reservoir simulation equations. At each Newton iteration, a linear system is solved:
+
+`J(yn) Δy = -R(yn)`
+
+where:
+
+- `J(yn)` is the Jacobian matrix — derivatives of residual equations with respect to primary variables
+- `-R(yn)` is the right-hand side (rhs) — the negative of the residual vector evaluated at the current Newton state
+- `Δy` is the correction/update vector — not the full solution
+
+The correction vector `Δy` is initialized to zero before calling the iterative solver, which computes the update to apply: `yn+1 = yn + Δy`.
+
+**Note on wells**: By default, OPM Flow uses a Schur complement approach to handle well equations separately from the reservoir system. This tool requires the well contributions to be explicitly included in the Jacobian matrix, which can be enabled in opm flow with `--matrix-add-well-contributions=true`. This ensures the benchmarked system matches the complete linearized problem.
+
 ## Compiling
 We assume you have opm and dune in your prefix path. Compiling should just be
 
@@ -74,15 +90,13 @@ Runs **both solver and preconditioner on GPU**. Uses standard configs from `conf
 # Same config works for CPU...
 ./linsolverlab \
     -m ../examples/matrices/spe1/matrix.mm \
-    -x ../examples/matrices/spe1/rhs.mm \
-    -y ../examples/matrices/spe1/rhs.mm \
+    -r ../examples/matrices/spe1/rhs.mm \
     --configfile ../examples/configurations/dilu.json
 
 # ...and GPU (everything on GPU)
 ./linsolverlab \
     -m ../examples/matrices/spe1/matrix.mm \
-    -x ../examples/matrices/spe1/rhs.mm \
-    -y ../examples/matrices/spe1/rhs.mm \
+    -r ../examples/matrices/spe1/rhs.mm \
     --configfile ../examples/configurations/dilu.json \
     --linear-solver-accelerator gpu
 ```
@@ -99,8 +113,7 @@ Uses configs from `configurations/solver_adapter/` subfolder:
 ```bash
 ./linsolverlab \
     -m ../examples/matrices/spe1/matrix.mm \
-    -x ../examples/matrices/spe1/rhs.mm \
-    -y ../examples/matrices/spe1/rhs.mm \
+    -r ../examples/matrices/spe1/rhs.mm \
     --configfile ../examples/configurations/solver_adapter/gpudilu.json
 ```
 
@@ -115,8 +128,7 @@ Uses configs from `configurations/solver_adapter/` subfolder:
 ```
   -h, --help                        Show help message
   -m, --matrix-file arg             Matrix filename (.mm or .bin)
-  -x, --initial-guess-file arg      Initial guess filename
-  -y, --rhs-file arg                Right-hand side filename
+  -r, --rhs-file arg                Right-hand side filename
   -w, --cpr-weights-file arg        CPR weights filename (.mm or .bin) - optional
   --configfile arg                  Solver configuration file (.json)
   --linear-solver-accelerator arg   'cpu' (default) or 'gpu'
@@ -130,8 +142,7 @@ For CPR preconditioners, provide the weights file using `--cpr-weights-file`:
 ```bash
 ./linsolverlab \
     -m matrix.mm \
-    -x init.mm \
-    -y rhs.mm \
+    -r rhs.mm \
     -w weights.mm \
     --configfile cpr_config.json
 ```
@@ -162,8 +173,7 @@ You can benchmark preconditioners by using `"loopsolver"` with `"maxiter": 1`:
 ```bash
 ./linsolverlab \
     -m ../examples/matrices/spe1/matrix.mm \
-    -x ../examples/matrices/spe1/rhs.mm \
-    -y ../examples/matrices/spe1/rhs.mm \
+    -r ../examples/matrices/spe1/rhs.mm \
     --configfile config_preconditioner_only.json \
     --linear-solver-accelerator gpu
 ```

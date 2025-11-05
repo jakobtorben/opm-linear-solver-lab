@@ -80,7 +80,6 @@ readMatrix(const std::string& filename)
 template <int dim, class T = double>
 std::tuple<unsigned long long, Dune::InverseOperatorResult, bool>
 readAndSolve(const std::string& configFilename,
-             const std::string& xFilename,
              const std::string& matrixFilename,
              const std::string& rhsFilename,
              const std::string& weightsFilename,
@@ -93,8 +92,11 @@ readAndSolve(const std::string& configFilename,
     Opm::PropertyTree configuration(configFilename);
 
     auto Matrix = readMatrix<SpMatrix>(matrixFilename);
-    auto x = readVector<CPUVector>(xFilename);
     auto rhs = readVector<CPUVector>(rhsFilename);
+
+    // Initialize solution vector to zero
+    CPUVector  solutionUpdate(rhs.size());
+    solutionUpdate = 0.0;
 
     // Read CPR weights if provided
     std::optional<CPUVector> cprWeights;
@@ -123,7 +125,7 @@ readAndSolve(const std::string& configFilename,
             auto solver = CPUFlexibleSolver(*MatrixOperator, configuration, wc, 0);
 
             auto start = std::chrono::high_resolution_clock::now();
-            solver.apply(x, rhs, result);
+            solver.apply(solutionUpdate, rhs, result);
             auto end = std::chrono::high_resolution_clock::now();
 
             duration_us = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
@@ -154,11 +156,11 @@ readAndSolve(const std::string& configFilename,
             auto solver = GPUFlexibleSolver(*MatrixOperator, configuration, wc, 0);
 
             // Convert vectors to GPU
-            auto xOnGPU = GPUVector(x);
+            auto solutionUpdateOnGPU = GPUVector(solutionUpdate);
             auto rhsOnGPU = GPUVector(rhs);
 
             auto start = std::chrono::high_resolution_clock::now();
-            solver.apply(xOnGPU, rhsOnGPU, result);
+            solver.apply(solutionUpdateOnGPU, rhsOnGPU, result);
             OPM_GPU_SAFE_CALL(cudaDeviceSynchronize());
             auto end = std::chrono::high_resolution_clock::now();
 
@@ -214,8 +216,7 @@ main(int argc, char** argv)
     po::options_description desc("OPM Linear Solver Benchmarking Tool");
     desc.add_options()("help,h", "Produce this help message")(
         "matrix-file,m", po::value<std::string>()->required(), "Matrix filename (.mm or .bin)")(
-        "initial-guess-file,x", po::value<std::string>()->required(), "Initial guess filename")(
-        "rhs-file,y", po::value<std::string>()->required(), "Right-hand side filename")(
+        "rhs-file,r", po::value<std::string>()->required(), "Right-hand side filename")(
         "configfile", po::value<std::string>()->required(), "Solver configuration file (.json)")(
         "linear-solver-accelerator",
         po::value<std::string>()->default_value("cpu"),
@@ -231,13 +232,13 @@ main(int argc, char** argv)
         if (vm.count("help")) {
             std::cout << desc << "\n\n";
             std::cout << "Example usage:\n";
-            std::cout << "  " << argv[0] << " -m matrix.mm -x init.mm -y rhs.mm --configfile config.json\n";
+            std::cout << "  " << argv[0] << " -m matrix.mm -r rhs.mm --configfile config.json\n";
             std::cout
                 << "  " << argv[0]
-                << " -m matrix.mm -x init.mm -y rhs.mm --configfile config.json --linear-solver-accelerator gpu\n";
+                << " -m matrix.mm -r rhs.mm --configfile config.json --linear-solver-accelerator gpu\n";
             std::cout
                 << "  " << argv[0]
-                << " -m matrix.mm -x init.mm -y rhs.mm -w weights.mm --configfile cpr_config.json\n";
+                << " -m matrix.mm -r rhs.mm -w weights.mm --configfile cpr_config.json\n";
             return EXIT_SUCCESS;
         }
 
@@ -250,7 +251,6 @@ main(int argc, char** argv)
 
     // Get command-line arguments
     const auto matrixFilename = vm["matrix-file"].as<std::string>();
-    const auto xFilename = vm["initial-guess-file"].as<std::string>();
     const auto rhsFilename = vm["rhs-file"].as<std::string>();
     const auto configFilename = vm["configfile"].as<std::string>();
     const auto accelerator = vm["linear-solver-accelerator"].as<std::string>();
@@ -287,16 +287,16 @@ main(int argc, char** argv)
 
         switch (dim) {
         case 1:
-            result = readAndSolve<1>(configFilename, xFilename, matrixFilename, rhsFilename, weightsFilename, accelerator);
+            result = readAndSolve<1>(configFilename, matrixFilename, rhsFilename, weightsFilename, accelerator);
             break;
         case 2:
-            result = readAndSolve<2>(configFilename, xFilename, matrixFilename, rhsFilename, weightsFilename, accelerator);
+            result = readAndSolve<2>(configFilename, matrixFilename, rhsFilename, weightsFilename, accelerator);
             break;
         case 3:
-            result = readAndSolve<3>(configFilename, xFilename, matrixFilename, rhsFilename, weightsFilename, accelerator);
+            result = readAndSolve<3>(configFilename, matrixFilename, rhsFilename, weightsFilename, accelerator);
             break;
         case 4:
-            result = readAndSolve<4>(configFilename, xFilename, matrixFilename, rhsFilename, weightsFilename, accelerator);
+            result = readAndSolve<4>(configFilename, matrixFilename, rhsFilename, weightsFilename, accelerator);
             break;
         default:
             std::cerr << "Error: Unsupported block dimension " << dim << "\n";
