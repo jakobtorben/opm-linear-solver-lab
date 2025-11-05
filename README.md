@@ -151,19 +151,29 @@ The weights file should be in MatrixMarket format.
 
 ### Example Output
 
+The tool outputs JSON with timing and convergence information:
+
 ```json
 {
     "accelerator": "cpu",
-    "runtime_us": "10680",
+    "precond_update_time_s": "0.0012345",
+    "solver_apply_time_s": "0.0098765",
+    "solver_total_time_s": "0.011111",
     "failed_by_exception": "false",
     "iterations": "24",
     "reduction": "8.0168234269055139e-13",
     "converged": "true",
     "conv_rate": "0.31332864211998734",
-    "elapsed": "0.010678536000000001",
+    "solver_internal_elapsed_s": "0.010678536000000001",
     "condition_estimate": "-1"
 }
 ```
+
+**Timing Fields**:
+- `precond_update_time_s`: Time spent in `preconditioner.update()`, which is the time spent in the preconditioner to update it based on the current matrix values.
+- `solver_apply_time_s`: Time spent in `solver.apply()` (the actual linear solve)
+- `solver_total_time_s`: Total measured time (`precond_update_time_s` + `solver_apply_time_s`)
+- `solver_internal_elapsed_s`: Dune's internal timing from the solver (may differ slightly from external measurements)
 
 
 ## Benchmarking Only the Preconditioner

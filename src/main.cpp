@@ -78,7 +78,7 @@ readMatrix(const std::string& filename)
 // - GPU path automatically handles matrix/vector conversion
 // - For preconditioner-only benchmarking, use "loopsolver" with "maxiter": 1
 template <int dim, class T = double>
-std::tuple<unsigned long long, Dune::InverseOperatorResult, bool>
+std::tuple<unsigned long long, unsigned long long, unsigned long long, Dune::InverseOperatorResult, bool>
 readAndSolve(const std::string& configFilename,
              const std::string& matrixFilename,
              const std::string& rhsFilename,
@@ -106,6 +106,8 @@ readAndSolve(const std::string& configFilename,
 
     Dune::InverseOperatorResult result;
     bool failed = false;
+    unsigned long long apply_duration_us = 0;
+    unsigned long long update_duration_us = 0;
     unsigned long long duration_us = 0;
 
     if (accelerator == "cpu") {
@@ -122,13 +124,22 @@ readAndSolve(const std::string& configFilename,
 
         try {
             auto MatrixOperator = std::make_shared<CPUOperator>(Matrix);
-            auto solver = CPUFlexibleSolver(*MatrixOperator, configuration, wc, 0);
+            auto solver = CPUFlexibleSolver(*MatrixOperator, configuration, wc, /* pressureIndex = */ 1);
 
-            auto start = std::chrono::high_resolution_clock::now();
+            // Apply solver
+            auto apply_start = std::chrono::high_resolution_clock::now();
             solver.apply(solutionUpdate, rhs, result);
-            auto end = std::chrono::high_resolution_clock::now();
+            auto apply_end = std::chrono::high_resolution_clock::now();
+            apply_duration_us = std::chrono::duration_cast<std::chrono::microseconds>(apply_end - apply_start).count();
 
-            duration_us = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+            // Perform post-solve update of preconditioner to measure the update time. Full update of preconditioner is done in constructor.
+            // Note that for some preconditioners, such Dune AMG, the preconditioner only does a partial/faster AMG update.
+            auto update_start = std::chrono::high_resolution_clock::now();
+            solver.preconditioner().update();
+            auto update_end = std::chrono::high_resolution_clock::now();
+            update_duration_us = std::chrono::duration_cast<std::chrono::microseconds>(update_end - update_start).count();
+
+            duration_us = apply_duration_us + update_duration_us;
         } catch (const std::exception& e) {
             std::cerr << "CPU solver failed: " << e.what() << "\n";
             failed = true;
@@ -152,19 +163,29 @@ readAndSolve(const std::string& configFilename,
             auto MatrixOnGPU = GPUMatrix::fromMatrix(Matrix);
             auto MatrixOperator = std::make_shared<GPUOperator>(MatrixOnGPU);
 
-            // Create FlexibleSolver
-            auto solver = GPUFlexibleSolver(*MatrixOperator, configuration, wc, 0);
+            // Create FlexibleSolver, which includes setting up the preconditioner
+            auto solver = GPUFlexibleSolver(*MatrixOperator, configuration, wc, /* pressureIndex = */ 1);
 
             // Convert vectors to GPU
             auto solutionUpdateOnGPU = GPUVector(solutionUpdate);
             auto rhsOnGPU = GPUVector(rhs);
 
-            auto start = std::chrono::high_resolution_clock::now();
+            // Apply solver
+            auto apply_start = std::chrono::high_resolution_clock::now();
             solver.apply(solutionUpdateOnGPU, rhsOnGPU, result);
             OPM_GPU_SAFE_CALL(cudaDeviceSynchronize());
-            auto end = std::chrono::high_resolution_clock::now();
+            auto apply_end = std::chrono::high_resolution_clock::now();
+            apply_duration_us = std::chrono::duration_cast<std::chrono::microseconds>(apply_end - apply_start).count();
 
-            duration_us = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+            // Perform post-solve update of preconditioner to measure the update time. Full update of preconditioner is done in constructor.
+            // Note that for some preconditioners, such as Dune AMG, the preconditioner only does a partial/faster AMG update.
+            auto update_start = std::chrono::high_resolution_clock::now();
+            solver.preconditioner().update();
+            OPM_GPU_SAFE_CALL(cudaDeviceSynchronize());
+            auto update_end = std::chrono::high_resolution_clock::now();
+            update_duration_us = std::chrono::duration_cast<std::chrono::microseconds>(update_end - update_start).count();
+
+            duration_us = apply_duration_us + update_duration_us;
         } catch (const std::exception& e) {
             std::cerr << "GPU solver failed: " << e.what() << "\n";
             failed = true;
@@ -173,25 +194,34 @@ readAndSolve(const std::string& configFilename,
         throw std::runtime_error("Invalid accelerator: " + accelerator);
     }
 
-    return std::make_tuple(duration_us, result, failed);
+    return std::make_tuple(apply_duration_us, update_duration_us, duration_us, result, failed);
 }
 
 
 void
 printResults(const std::string& accelerator,
-             unsigned long long runtime_us,
+             unsigned long long update_duration_us,
+             unsigned long long apply_duration_us,
+             unsigned long long duration_us,
              const Dune::InverseOperatorResult& result,
              bool failed)
 {
+    // Convert microseconds to seconds
+    double precond_update_time_s = update_duration_us / 1e6;
+    double solver_apply_time_s = apply_duration_us / 1e6;
+    double solver_total_time_s = duration_us / 1e6;
+
     boost::property_tree::ptree tree;
     tree.add("accelerator", accelerator);
-    tree.add("runtime_us", runtime_us);
+    tree.add("precond_update_time_s", precond_update_time_s);
+    tree.add("solver_apply_time_s", solver_apply_time_s);
+    tree.add("solver_total_time_s", solver_total_time_s);
     tree.add("failed_by_exception", failed);
     tree.add("iterations", result.iterations);
     tree.add("reduction", result.reduction);
     tree.add("converged", result.converged);
     tree.add("conv_rate", result.conv_rate);
-    tree.add("elapsed", result.elapsed);
+    tree.add("solver_internal_elapsed_s", result.elapsed);
     tree.add("condition_estimate", result.condition_estimate);
 
     boost::property_tree::write_json(std::cout, tree, true);
@@ -283,7 +313,7 @@ main(int argc, char** argv)
 
     // Run solver based on block size
     try {
-        std::tuple<unsigned long long, Dune::InverseOperatorResult, bool> result;
+        std::tuple<unsigned long long, unsigned long long, unsigned long long, Dune::InverseOperatorResult, bool> result;
 
         switch (dim) {
         case 1:
@@ -303,8 +333,8 @@ main(int argc, char** argv)
             return EXIT_FAILURE;
         }
 
-        auto [runtime_us, solve_result, failed] = result;
-        printResults(accelerator, runtime_us, solve_result, failed);
+        auto [apply_duration_us, update_duration_us, duration_us, solve_result, failed] = result;
+        printResults(accelerator, apply_duration_us, update_duration_us, duration_us, solve_result, failed);
         return failed ? EXIT_FAILURE : EXIT_SUCCESS;
 
     } catch (const std::exception& e) {
